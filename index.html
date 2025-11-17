@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>My trips around the world</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    header {
+      padding: 10px 15px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+      z-index: 1000;
+      background: #ffffff;
+    }
+
+    header h1 {
+      margin: 0 0 4px 0;
+      font-size: 1.3rem;
+    }
+
+    header p {
+      margin: 2px 0;
+      font-size: 0.95rem;
+    }
+
+    .counter {
+      font-weight: 600;
+    }
+
+    .controls {
+      margin-top: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    button {
+      border: none;
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      background: #457b9d;
+      color: #fff;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    #map {
+      flex: 1 1 auto;
+      width: 100%;
+    }
+
+    footer {
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      background: #f5f5f5;
+      border-top: 1px solid #ddd;
+    }
+
+    footer a {
+      color: inherit;
+    }
+
+    /* Mobile adjustments */
+    @media (max-width: 600px) {
+      header h1 {
+        font-size: 1.1rem;
+      }
+      header p {
+        font-size: 0.85rem;
+      }
+      button {
+        flex: 1 1 auto;
+        text-align: center;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>My trips around the world</h1>
+    <p>
+      I have visited
+      <span class="counter">
+        <span id="visited-count">0</span> countries
+      </span>
+      out of
+      <span class="counter" id="total-count">0</span>
+      worldwide
+      (<span id="percent-visited">0%</span> of the world).
+    </p>
+    <p>Click on a country to mark / unmark it as “visited”.</p>
+
+    <div class="controls">
+      <button id="reset-btn">Reset all countries</button>
+    </div>
+  </header>
+
+  <div id="map"></div>
+
+  <footer>
+    Country boundaries: 
+    <a href="https://github.com/datasets/geo-countries" target="_blank" rel="noopener noreferrer">
+      Natural Earth / geo-countries GeoJSON
+    </a>.
+    Base map tiles: &copy;
+    <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener noreferrer">
+      OpenStreetMap
+    </a>
+    contributors.
+  </footer>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // Local storage key for visited countries
+    const visitedKey = 'visitedWorldCountries';
+    let visited = new Set(JSON.parse(localStorage.getItem(visitedKey) || '[]'));
+
+    let total = 0;
+    const visitedCountEl = document.getElementById('visited-count');
+    const totalCountEl   = document.getElementById('total-count');
+    const percentEl      = document.getElementById('percent-visited');
+    const resetBtn       = document.getElementById('reset-btn');
+
+    function updateCounter() {
+      visitedCountEl.textContent = visited.size;
+      totalCountEl.textContent   = total;
+      if (total > 0) {
+        const percent = (visited.size / total * 100).toFixed(1);
+        percentEl.textContent = percent + '%';
+      } else {
+        percentEl.textContent = '0%';
+      }
+    }
+
+    // Create the map centered on the world
+    const map = L.map('map').setView([20, 0], 2);
+
+    // OpenStreetMap background tiles
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 6,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Helper: build a stable ID per country
+    function getCountryId(feature) {
+      const p = feature.properties || {};
+      // The geo-countries dataset uses ISO_A3 or similar fields
+      return (
+        p.ISO_A3 ||
+        p.iso_a3 ||
+        p.ADM0_A3 ||
+        p.id ||
+        p.name ||
+        p.ADMIN
+      );
+    }
+
+    // Helper: build a display name
+    function getCountryName(feature) {
+      const p = feature.properties || {};
+      return (
+        p.ADMIN ||
+        p.name ||
+        p.NAME_LONG ||
+        p.NAME ||
+        'Country'
+      );
+    }
+
+    // Style for visited / not visited countries
+    function style(feature) {
+      const id = getCountryId(feature);
+      const isVisited = id && visited.has(id);
+
+      return {
+        color: '#222',
+        weight: 0.7,
+        fillOpacity: isVisited ? 0.8 : 0.25,
+        fillColor: isVisited ? '#e63946' : '#457b9d'
+      };
+    }
+
+    // Behaviour for each country polygon
+    function onEachFeature(feature, layer) {
+      const id   = getCountryId(feature);
+      const name = getCountryName(feature);
+
+      if (!id) return;
+
+      layer.bindPopup(name);
+
+      layer.on('click', function () {
+        if (visited.has(id)) {
+          visited.delete(id);
+        } else {
+          visited.add(id);
+        }
+        localStorage.setItem(visitedKey, JSON.stringify(Array.from(visited)));
+        layer.setStyle(style(feature));
+        updateCounter();
+      });
+    }
+
+    let worldLayer = null;
+
+    // Load world countries GeoJSON
+    fetch('world_countries.geojson')
+      .then(response => {
+        if (!response.ok) {
+          throw new Error('HTTP ' + response.status + ' for world_countries.geojson');
+        }
+        return response.json();
+      })
+      .then(data => {
+        total = data.features.length;
+
+        worldLayer = L.geoJSON(data, {
+          style: style,
+          onEachFeature: onEachFeature
+        }).addTo(map);
+
+        updateCounter();
+      })
+      .catch(err => {
+        console.error('Error loading world_countries.geojson', err);
+        alert('Could not load world_countries.geojson. Make sure the file is in the repository with that exact name.');
+      });
+
+    // Reset all countries
+    resetBtn.addEventListener('click', () => {
+      visited = new Set();
+      localStorage.setItem(visitedKey, JSON.stringify([]));
+
+      if (worldLayer) {
+        worldLayer.eachLayer(l => {
+          l.setStyle(style(l.feature));
+        });
+      }
+
+      updateCounter();
+    });
+  </script>
+</body>
+</html>
