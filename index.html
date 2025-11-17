@@ -62,6 +62,10 @@
       color: #fff;
     }
 
+    button.secondary {
+      background: #6c757d;
+    }
+
     button:disabled {
       opacity: 0.6;
       cursor: default;
@@ -70,6 +74,59 @@
     #map {
       flex: 1 1 auto;
       width: 100%;
+    }
+
+    #visited-list-container {
+      padding: 10px 15px;
+      font-size: 0.9rem;
+      border-top: 1px solid #eee;
+      background: #fafafa;
+    }
+
+    #visited-list-container h2 {
+      margin: 4px 0 2px 0;
+      font-size: 1rem;
+    }
+
+    #visited-list-container h3 {
+      margin: 8px 0 2px 0;
+      font-size: 0.95rem;
+    }
+
+    #visited-list,
+    #bucket-list,
+    #continent-ranking,
+    #timeline-list {
+      margin: 4px 0 0 0;
+      padding: 0;
+      list-style: none;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    #continent-ranking,
+    #timeline-list {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    #visited-list li,
+    #bucket-list li {
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: #e1ecf4;
+      font-size: 0.85rem;
+    }
+
+    #bucket-list li {
+      background: #fce4ec;
+    }
+
+    #continent-ranking li,
+    #timeline-list li {
+      padding: 2px 0;
+      font-size: 0.85rem;
     }
 
     footer {
@@ -95,6 +152,9 @@
         flex: 1 1 auto;
         text-align: center;
       }
+      #visited-list-container {
+        font-size: 0.85rem;
+      }
     }
   </style>
 </head>
@@ -112,17 +172,35 @@
       worldwide
       (<span id="percent-visited">0%</span> of the world).
     </p>
-    <p>Click on a country to mark / unmark it as “visited”.</p>
+    <p>Click on a country to mark / unmark it as “visited”. Use “Bucket list mode” to mark future trips.</p>
 
     <div class="controls">
       <button id="reset-btn">Reset all countries</button>
+      <button id="export-btn">Download map as PNG</button>
+      <button id="bucket-btn" class="secondary">Bucket list mode: OFF</button>
     </div>
   </header>
 
   <div id="map"></div>
 
+  <div id="visited-list-container">
+    <h2>Summary</h2>
+
+    <h3>Visited countries</h3>
+    <ul id="visited-list"></ul>
+
+    <h3>Bucket list (countries to visit)</h3>
+    <ul id="bucket-list"></ul>
+
+    <h3>Most visited continents</h3>
+    <ol id="continent-ranking"></ol>
+
+    <h3>Travel timeline</h3>
+    <ul id="timeline-list"></ul>
+  </div>
+
   <footer>
-    Country boundaries: 
+    Country boundaries:
     <a href="https://github.com/datasets/geo-countries" target="_blank" rel="noopener noreferrer">
       Natural Earth / geo-countries GeoJSON
     </a>.
@@ -135,17 +213,50 @@
 
   <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- html2canvas for PNG export -->
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 
   <script>
-    // Local storage key for visited countries
+    // Local storage keys
     const visitedKey = 'visitedWorldCountries';
+    const bucketKey  = 'bucketWorldCountries';
+    const datesKey   = 'visitedWorldCountriesDates';
+
     let visited = new Set(JSON.parse(localStorage.getItem(visitedKey) || '[]'));
+    let bucket  = new Set(JSON.parse(localStorage.getItem(bucketKey)  || '[]'));
+    let visitedDates = JSON.parse(localStorage.getItem(datesKey) || '{}'); // { countryId: dateString }
 
     let total = 0;
-    const visitedCountEl = document.getElementById('visited-count');
-    const totalCountEl   = document.getElementById('total-count');
-    const percentEl      = document.getElementById('percent-visited');
-    const resetBtn       = document.getElementById('reset-btn');
+
+    const visitedCountEl  = document.getElementById('visited-count');
+    const totalCountEl    = document.getElementById('total-count');
+    const percentEl       = document.getElementById('percent-visited');
+    const resetBtn        = document.getElementById('reset-btn');
+    const exportBtn       = document.getElementById('export-btn');
+    const bucketBtn       = document.getElementById('bucket-btn');
+
+    const visitedListEl   = document.getElementById('visited-list');
+    const bucketListEl    = document.getElementById('bucket-list');
+    const continentRankingEl = document.getElementById('continent-ranking');
+    const timelineListEl  = document.getElementById('timeline-list');
+
+    // Maps for metadata
+    const countryNameById      = new Map(); // id -> display name
+    const countryContinentById = new Map(); // id -> continent
+    const continentTotals      = new Map(); // continent -> total countries
+
+    let bucketMode = false;
+
+    function setBucketMode(on) {
+      bucketMode = on;
+      if (bucketMode) {
+        bucketBtn.textContent = 'Bucket list mode: ON';
+        bucketBtn.style.background = '#8e44ad';
+      } else {
+        bucketBtn.textContent = 'Bucket list mode: OFF';
+        bucketBtn.style.background = '#6c757d';
+      }
+    }
 
     function updateCounter() {
       visitedCountEl.textContent = visited.size;
@@ -156,21 +267,169 @@
       } else {
         percentEl.textContent = '0%';
       }
+      updateVisitedList();
+      updateBucketList();
+      updateContinentRanking();
+      updateTimeline();
     }
 
-    // Create the map centered on the world
-    const map = L.map('map').setView([20, 0], 2);
+    function updateVisitedList() {
+      visitedListEl.innerHTML = '';
+      const items = [];
+      visited.forEach(id => {
+        const name = countryNameById.get(id) || id;
+        items.push({ id, name });
+      });
+      items.sort((a, b) => a.name.localeCompare(b.name));
 
-    // OpenStreetMap background tiles
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 6,
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
+      if (items.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = 'None yet.';
+        li.style.background = 'transparent';
+        visitedListEl.appendChild(li);
+        return;
+      }
+
+      items.forEach(item => {
+        const li = document.createElement('li');
+        li.textContent = item.name;
+        visitedListEl.appendChild(li);
+      });
+    }
+
+    function updateBucketList() {
+      bucketListEl.innerHTML = '';
+      const items = [];
+      bucket.forEach(id => {
+        const name = countryNameById.get(id) || id;
+        items.push({ id, name });
+      });
+      items.sort((a, b) => a.name.localeCompare(b.name));
+
+      if (items.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = 'None yet.';
+        li.style.background = 'transparent';
+        bucketListEl.appendChild(li);
+        return;
+      }
+
+      items.forEach(item => {
+        const li = document.createElement('li');
+        li.textContent = item.name;
+        bucketListEl.appendChild(li);
+      });
+    }
+
+    function updateContinentRanking() {
+      continentRankingEl.innerHTML = '';
+
+      // Compute visited counts by continent
+      const visitedByContinent = new Map();
+      visited.forEach(id => {
+        const cont = countryContinentById.get(id) || 'Other';
+        visitedByContinent.set(cont, (visitedByContinent.get(cont) || 0) + 1);
+      });
+
+      const items = [];
+      continentTotals.forEach((totalCount, cont) => {
+        const v = visitedByContinent.get(cont) || 0;
+        const percent = totalCount > 0 ? (v / totalCount * 100).toFixed(1) : '0.0';
+        items.push({ continent: cont, visited: v, total: totalCount, percent: parseFloat(percent) });
+      });
+
+      // Remove continents with 0 total (shouldn't happen) and sort by percent visited desc
+      const filtered = items.filter(i => i.total > 0);
+      filtered.sort((a, b) => b.percent - a.percent);
+
+      if (filtered.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = 'No data yet.';
+        continentRankingEl.appendChild(li);
+        return;
+      }
+
+      filtered.forEach(item => {
+        const li = document.createElement('li');
+        const pctStr = item.percent.toFixed(1);
+        li.textContent = `${item.continent}: ${item.visited}/${item.total} countries (${pctStr}%)`;
+        continentRankingEl.appendChild(li);
+      });
+    }
+
+    function updateTimeline() {
+      timelineListEl.innerHTML = '';
+
+      const entries = [];
+      visited.forEach(id => {
+        const dateStr = visitedDates[id];
+        const name = countryNameById.get(id) || id;
+        if (!dateStr) {
+          entries.push({ id, name, dateStr: 'Unknown date', dateValue: null });
+        } else {
+          const d = new Date(dateStr);
+          const valid = !isNaN(d.getTime());
+          entries.push({
+            id,
+            name,
+            dateStr,
+            dateValue: valid ? d.getTime() : null
+          });
+        }
+      });
+
+      if (entries.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = 'No trips recorded yet.';
+        timelineListEl.appendChild(li);
+        return;
+      }
+
+      // Sort: first by date (known), then unknown, then by name
+      entries.sort((a, b) => {
+        if (a.dateValue !== null && b.dateValue !== null) {
+          return a.dateValue - b.dateValue;
+        }
+        if (a.dateValue === null && b.dateValue === null) {
+          return a.name.localeCompare(b.name);
+        }
+        if (a.dateValue === null) return 1;
+        return -1;
+      });
+
+      entries.forEach(item => {
+        const li = document.createElement('li');
+        li.textContent = `${item.dateStr}: ${item.name}`;
+        timelineListEl.appendChild(li);
+      });
+    }
+
+    // Simple palette by continent (default colors for "not visited / not bucket")
+    const continentColors = {
+      'Africa': '#ffcc80',
+      'Europe': '#90caf9',
+      'Asia': '#a5d6a7',
+      'North America': '#ffe082',
+      'South America': '#ffab91',
+      'Oceania': '#ce93d8',
+      'Antarctica': '#eeeeee',
+      'Other': '#b0bec5'
+    };
+
+    // Helper: get continent name from properties
+    function getContinent(feature) {
+      const p = feature.properties || {};
+      return (
+        p.CONTINENT ||
+        p.region_un ||
+        p.region_wb ||
+        'Other'
+      );
+    }
 
     // Helper: build a stable ID per country
     function getCountryId(feature) {
       const p = feature.properties || {};
-      // The geo-countries dataset uses ISO_A3 or similar fields
       return (
         p.ISO_A3 ||
         p.iso_a3 ||
@@ -193,41 +452,111 @@
       );
     }
 
-    // Style for visited / not visited countries
+    // Style for countries, including visited & bucket list
     function style(feature) {
       const id = getCountryId(feature);
       const isVisited = id && visited.has(id);
+      const isBucket  = id && bucket.has(id);
+      const continent = getContinent(feature);
+      const baseColor = continentColors[continent] || continentColors['Other'];
 
+      if (isVisited) {
+        return {
+          color: '#444',
+          weight: 0.7,
+          fillOpacity: 0.9,
+          fillColor: '#e63946'
+        };
+      }
+      if (isBucket) {
+        return {
+          color: '#444',
+          weight: 0.7,
+          fillOpacity: 0.9,
+          fillColor: '#8e44ad'
+        };
+      }
       return {
-        color: '#222',
+        color: '#444',
         weight: 0.7,
-        fillOpacity: isVisited ? 0.8 : 0.25,
-        fillColor: isVisited ? '#e63946' : '#457b9d'
+        fillOpacity: 0.5,
+        fillColor: baseColor
       };
     }
 
+    // Create the map centered on the world
+    const map = L.map('map').setView([20, 0], 2);
+
+    // OpenStreetMap background tiles
+    const baseLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 6,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let worldLayer = null;
+
     // Behaviour for each country polygon
     function onEachFeature(feature, layer) {
-      const id   = getCountryId(feature);
-      const name = getCountryName(feature);
+      const id        = getCountryId(feature);
+      const name      = getCountryName(feature);
+      const continent = getContinent(feature);
 
       if (!id) return;
+
+      // Store metadata
+      countryNameById.set(id, name);
+      countryContinentById.set(id, continent);
+      continentTotals.set(continent, (continentTotals.get(continent) || 0) + 1);
 
       layer.bindPopup(name);
 
       layer.on('click', function () {
-        if (visited.has(id)) {
-          visited.delete(id);
+        if (!bucketMode) {
+          // Manage visited countries
+          if (visited.has(id)) {
+            visited.delete(id);
+            // Remove date info if it exists
+            if (visitedDates[id]) {
+              delete visitedDates[id];
+              localStorage.setItem(datesKey, JSON.stringify(visitedDates));
+            }
+          } else {
+            visited.add(id);
+            // Ask for visit date the first time
+            if (!visitedDates[id]) {
+              const answer = window.prompt(
+                `When did you first visit ${name}?\n\nUse format YYYY-MM-DD (or just a year, or leave blank).`,
+                ''
+              );
+              if (answer && answer.trim()) {
+                visitedDates[id] = answer.trim();
+                localStorage.setItem(datesKey, JSON.stringify(visitedDates));
+              }
+            }
+            // If this country was in bucket list, remove it
+            if (bucket.has(id)) {
+              bucket.delete(id);
+              localStorage.setItem(bucketKey, JSON.stringify(Array.from(bucket)));
+            }
+          }
+          localStorage.setItem(visitedKey, JSON.stringify(Array.from(visited)));
         } else {
-          visited.add(id);
+          // Bucket list mode: manage bucket list only
+          if (bucket.has(id)) {
+            bucket.delete(id);
+          } else {
+            // If already visited, no need to add to bucket list
+            if (!visited.has(id)) {
+              bucket.add(id);
+            }
+          }
+          localStorage.setItem(bucketKey, JSON.stringify(Array.from(bucket)));
         }
-        localStorage.setItem(visitedKey, JSON.stringify(Array.from(visited)));
+
         layer.setStyle(style(feature));
         updateCounter();
       });
     }
-
-    let worldLayer = null;
 
     // Load world countries GeoJSON
     fetch('world_countries.geojson')
@@ -252,10 +581,15 @@
         alert('Could not load world_countries.geojson. Make sure the file is in the repository with that exact name.');
       });
 
-    // Reset all countries
+    // Reset all countries & bucket list
     resetBtn.addEventListener('click', () => {
       visited = new Set();
+      bucket  = new Set();
+      visitedDates = {};
+
       localStorage.setItem(visitedKey, JSON.stringify([]));
+      localStorage.setItem(bucketKey,  JSON.stringify([]));
+      localStorage.setItem(datesKey,   JSON.stringify(visitedDates));
 
       if (worldLayer) {
         worldLayer.eachLayer(l => {
@@ -265,6 +599,54 @@
 
       updateCounter();
     });
+
+    // Bucket mode button
+    bucketBtn.addEventListener('click', () => {
+      setBucketMode(!bucketMode);
+    });
+
+    // Export map as PNG (without the base OSM tiles, to avoid CORS issues)
+    exportBtn.addEventListener('click', () => {
+      if (typeof html2canvas === 'undefined') {
+        alert('Export is not available right now.');
+        return;
+      }
+
+      resetBtn.disabled  = true;
+      exportBtn.disabled = true;
+      bucketBtn.disabled = true;
+
+      // Temporarily remove the base map (OSM tiles) to avoid cross-origin issues
+      map.removeLayer(baseLayer);
+
+      const mapElement = document.getElementById('map');
+
+      html2canvas(mapElement, {
+        backgroundColor: '#ffffff'
+      }).then(canvas => {
+        // Restore the base map
+        map.addLayer(baseLayer);
+
+        // Create a download link
+        const link = document.createElement('a');
+        link.download = 'world-trips.png';
+        link.href = canvas.toDataURL('image/png');
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }).catch(err => {
+        console.error('Error exporting map as PNG:', err);
+        alert('Sorry, something went wrong while exporting the map.');
+        map.addLayer(baseLayer);
+      }).finally(() => {
+        resetBtn.disabled  = false;
+        exportBtn.disabled = false;
+        bucketBtn.disabled = false;
+      });
+    });
+
+    // Initialize bucket button state on load
+    setBucketMode(false);
   </script>
 </body>
 </html>
